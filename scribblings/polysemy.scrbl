@@ -17,14 +17,31 @@ This module allows defining polysemic identifiers which can act as a
 @tech[#:doc '(lib "scribblings/reference/reference.scrbl")]{match expander},
 as a @tech[#:doc '(lib "scribblings/guide/guide.scrbl")]{macro}, as an
 @tech[#:doc '(lib "scribblings/guide/guide.scrbl")]{identifier macro}, as a
-@racket[set!] subform, and as a collection of 
+@racket[set!] subform, and as a collection of function overloads.
 
+The following meanings are special:
+
+@itemlist[
+ @item{The value for the @racket[normal-macro] meaning is used when the
+  identifier appears as the first element of a macro application (i.e. when it
+  is used as a as a @tech[#:doc '(lib "scribblings/guide/guide.scrbl")]{
+   macro}).}
+ @item{The value for the @racket[identifier-macro] meaning is used when the
+  identifier appears on its own as an expression (i.e. when it is used as an
+  @tech[#:doc '(lib "scribblings/guide/guide.scrbl")]{identifier macro}).}
+ @item{The value for the @racket[match-expander] meaning is used when the
+  identifier is used as a match template}
+ @item{The value for the @racket['set!-macro] meaning is used when the
+  identifier is appears as the second element of a @racket[set!] form.}
+ @item{Other "core" meanings may be added later, and third-party libraries can
+  define their own meanings.}]
 
 In all the forms below, the @racket[_meaning] should be a simple identifier.
-Note that is lexical context is not taken into account (i.e. it is used as a
-symbol), and therefore every @racket[_meaning] should be globally unique.
-Later versions may add a notion of hygiene to meanings (allowing these
-meanings themselves to be renamed, to circumvent conflicts).
+Note that is lexical context is not taken into account (i.e. the comparison is
+based on the equality of symbols, not based on @racket[free-identifier=?]),
+and therefore every @racket[_meaning] should be globally unique. Later
+versions may add a notion of hygiene to meanings (allowing these meanings
+themselves to be renamed, to circumvent conflicts).
 
 @defform[#:kind "require transformer"
          (poly-only-in module [maybe-rename meaning ...] ...)
@@ -78,7 +95,13 @@ meanings themselves to be renamed, to circumvent conflicts).
  Defines @racket[id] as a literal with the given @racket[meaning]. The
  @racket[syntax-class] is automatically defined to recognise the given
  @racket[meaning] of @racket[id], even if @racket[id] was renamed and its
- different meanings split out and recombined into different identifiers.}
+ different meanings split out and recombined into different identifiers.
+
+ This can be used to define "tokens" for macros, which bear a special meaning
+ for some macros, but might have a different meaning for another third-party
+ macro. If both rely on @racketmodname[polysemy], then they can use the same
+ default name, without the risk of the identifiers conflicting. Furthermore, it
+ is possible to rename the two meanings separately.}
 
 @defform[(define-poly-case (name [arg₀ pred?] argᵢ ...) . body)]{
  Note that the syntax for this form will be changed in the future when support
