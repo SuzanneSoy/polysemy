@@ -1,7 +1,7 @@
 #lang racket/base
 
 (provide
- ;; Another require transformer
+ ;; A require transformer
  poly-rename-in
  ;; Another require transformer
  poly-only-in
@@ -57,25 +57,26 @@
 (define-for-syntax (poly-require-transformer req stx)
   (syntax-parse stx
     [(_ mod
-        [old-id:id
+        [{~or {~and :id old-id new-id}
+              (old-id:id new-id:id)}
          meaning:id
-         {~optional new-id:id #:defaults ([new-id #'old-id])}]
+         ...]
         ...)
-     #:with (old-generated-id ...)
-     (map gen-id
+     #:with ((old-generated-id ...) ...)
+     (map (λ (id meanings) (map (λ (meaning) (gen-id id meaning)) meanings))
           (syntax->list #'(old-id ...))
-          (map syntax-e (syntax->list #'(meaning ...))))
+          (map syntax-e (syntax->list #'((meaning ...) ...))))
      #:with (new-generated-id ...)
-     (map gen-id
+     (map (λ (id meanings) (map (λ (meaning) (gen-id id meaning)) meanings))
           (syntax->list #'(new-id ...))
-          (map syntax-e (syntax->list #'(meaning ...))))
+          (map syntax-e (syntax->list #'((meaning ...) ...))))
      #:with (new-id-no-duplicates ...)
      (remove-duplicates (syntax->list #'(new-id ...))
                         free-identifier=?)
      #:with (new-safeguard-no-duplicates ...)
      (map (λ (one-id) (gen-id one-id '| safeguard |))
           (syntax->list #'(new-id-no-duplicates ...)))
-     (register-meanings (syntax->datum #'(meaning ...)))
+     (register-meanings (syntax->datum #'(meaning ... ...)))
      (expand-import
       #`(combine-in
          ;; We always require the same ids, so that multiple requires
@@ -83,7 +84,7 @@
          (only-in polysemy/private/ids
                   [the-polysemic-id new-id-no-duplicates] ...
                   [the-safeguard-id new-safeguard-no-duplicates] ...)
-         (#,req mod [old-generated-id new-generated-id] ...)))]))
+         (#,req mod [old-generated-id new-generated-id] ... ...)))]))
 
 ;; Require transformer which allows renaming parts of polysemic identifiers.
 (define-syntax poly-rename-in
@@ -177,12 +178,7 @@
        (syntax-case stx ()
          [(_ pvar meaning)
           ;; Do we need to (register-meanings #'(meaning)) here? I think not.
-          #'{~and {~var pvar (poly-stxclass 'meaning)}}
-          #;#'{~and {~var pvar id}
-                    {~do (displayln #'pvar)}
-                    {~bind [meaning-pvar
-                            ]}
-                    {~parse #t (not (not (attribute meaning-pvar)))}}])))))
+          #'{~and {~var pvar (poly-stxclass 'meaning)}}])))))
 
 (define-syntax-rule (define-poly-literal initial-id meaning syntax-class)
   (begin
@@ -207,16 +203,27 @@
     [(_ (name [arg₀ pred?] argᵢ ...) . body)
      (let ([meaning (string->symbol
                      (format "~a" `(poly-case ,(syntax-e #'pred?))))])
-       (with-syntax ([generated-name (gen-id #'name meaning)]
-                     [generated-normal-macro (gen-id #'name 'normal-macro)])
+       (with-syntax
+           ([generated-name (gen-id #'name meaning)]
+            [generated-normal-macro (gen-id #'name 'normal-macro)]
+            [generated-identifier-macro (gen-id #'name 'identifier-macro)])
          (register-meanings `(,meaning))
          #`(begin
              (define-poly name)
+             ;; TODO: provide keywords to selectively disable the
+             ;; identifier-macro or normal-macro behaviours. Also check that
+             ;; if identifier-binding does not return #f, it returns a binding
+             ;; for the-case-dispatch, and not for something else.
              #,@(if (identifier-binding #'generated-normal-macro)
                     #'{}
                     #'{(local-require
                         (only-in polysemy
                                  [the-case-dispatch generated-normal-macro]))})
+             #,@(if (identifier-binding #'generated-identifier-macro)
+                    #'{}
+                    #'{(local-require
+                        (only-in polysemy
+                                 [the-case-dispatch generated-identifier-macro]))})
              (define/contract (tmp-f arg₀ argᵢ ...)
                (-> pred? (or/c 'argᵢ any/c) ... any)
                . body)
@@ -230,11 +237,12 @@
   (unless contracts-supertypes
     (set! contracts-supertypes
           (make-free-id-table
-           `((,#'string? . (,#'any/c))
+           `((,#'any/c . ())
+             (,#'string? . (,#'any/c))
              (,#'exact-positive-integer? . (,#'exact-integer? ,#'positive?))
              (,#'exact-integer . (,#'integer? ,#'exact?))
              (,#'integer? . (,#'number?))
-             (,#'exact . (,#'number?)) ;; not quite right
+             (,#'exact? . (,#'number?)) ;; not quite right
              (,#'number? . (,#'any/c))
              (,#'zero? . ,#'integer?)
              #;…))))
@@ -267,17 +275,20 @@
   ;; Move up the inheritance DAG, and see if any of the ancestors
   ;; is covered. Since we start with the parents of the user-supplied contract,
   ;; there will be no self-detection.
+  (define already-recur (mutable-free-id-set))
   (define (recur pred-id)
-    (when (free-id-set-member? covered-ids pred-id)
+    (unless (free-id-set-member? already-recur pred-id)
+      (free-id-set-add! already-recur pred-id)
+      (when (free-id-set-member? covered-ids pred-id)
         (raise-syntax-error 'polysemy
                             "some available function cases overlap"
                             stx
                             #f
                             pred-ids))
-    (unless (free-identifier=? pred-id #'any/c)
-      (for-each recur (free-id-table-ref contracts-supertypes pred-id '()))))
+      (for-each recur (free-id-table-ref contracts-supertypes pred-id))))
   (for ([pred-id (in-list pred-ids)])
-    (apply recur (free-id-table-ref contracts-supertypes pred-id))))
+    (apply recur (free-id-table-ref contracts-supertypes
+                                    pred-id))))
 
 (define-for-syntax (the-case-dispatch-impl stx)
   (syntax-case stx ()
