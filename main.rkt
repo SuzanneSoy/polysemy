@@ -63,13 +63,15 @@
          ...]
         ...)
      #:with ((old-generated-id ...) ...)
-     (map (λ (id meanings) (map (λ (meaning) (gen-id id meaning)) meanings))
+     (map (λ (id meanings) (map (λ (meaning) (gen-id id (syntax-e meaning)))
+                                (syntax->list meanings)))
           (syntax->list #'(old-id ...))
-          (map syntax-e (syntax->list #'((meaning ...) ...))))
-     #:with (new-generated-id ...)
-     (map (λ (id meanings) (map (λ (meaning) (gen-id id meaning)) meanings))
+          (syntax->list #'((meaning ...) ...)))
+     #:with ((new-generated-id ...) ...)
+     (map (λ (id meanings) (map (λ (meaning) (gen-id id (syntax-e meaning)))
+                                (syntax->list meanings)))
           (syntax->list #'(new-id ...))
-          (map syntax-e (syntax->list #'((meaning ...) ...))))
+          (syntax->list #'((meaning ...) ...)))
      #:with (new-id-no-duplicates ...)
      (remove-duplicates (syntax->list #'(new-id ...))
                         free-identifier=?)
@@ -124,12 +126,12 @@
                        (map (λ (one-id) (gen-id one-id '| safeguard |))
                             (syntax->list #'(new-id ...)))])
           (register-meanings (syntax->datum #'(meaning ... ...)))
-          (expand-export #'(combine-out new-id ...
-                                        safeguard ...
-                                        (rename-out [old-generated-id
-                                                     new-generated-id]
-                                                    ... ...))
-                         modes))]))))
+          (pre-expand-export #'(combine-out new-id ...
+                                            safeguard ...
+                                            (rename-out [old-generated-id
+                                                         new-generated-id]
+                                                        ... ...))
+                             modes))]))))
 
 ;; Definition of polysemic identifiers and parts of these
 ;; _____________________________________________________________________________
@@ -267,7 +269,7 @@
     (for ([expanded (in-list expanded*)])
       (when (free-id-set-member? covered-ids expanded)
         (raise-syntax-error 'polysemy
-                            "Overlap between function cases"
+                            "some available function cases overlap"
                             stx
                             #f
                             pred-ids))

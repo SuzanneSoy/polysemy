@@ -1,15 +1,15 @@
 #lang racket
 
-(provide (poly-out [baz identifier-macro match-expander]))
-
 (require polysemy
          rackunit)
 
+(provide (poly-out [baz identifier-macro match-expander]))
+
 (require (poly-rename-in "test-provide.rkt"
-                         [foo identifier-macro baz])
+                         [(foo baz) identifier-macro])
          (poly-rename-in "test-provide-b.rkt"
-                         [bar identifier-macro foo]
-                         [bar match-expander baz]
+                         [(bar foo) identifier-macro]
+                         [(bar baz) match-expander]
                          [foo match-expander]))
 
 (define-poly bar identifier-macro (λ (stx) #'"overridden bar"))
