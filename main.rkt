@@ -1,157 +1,311 @@
 #lang racket/base
 
 (provide
- ;;; Require transformer (does not work correctly, for now)
- #;poly-in
  ;; Another require transformer
  poly-rename-in
- ;; Alternative require form which handles polysemic ids
- poly-require
+ ;; Another require transformer
+ poly-only-in
+ ;; Provide transformer
+ poly-out
  ;; Definition of a polysemic id, and of a part of a polysemic id
- define-poly)
+ define-poly
+ ;; Syntax-parse pattern expander which extracts the given meaning from the id
+ (for-syntax ~poly)
+ ;; Defines a literal which can be renamed, without conflicting with other
+ ;; poly literals, or identifiers with other meanings.
+ define-poly-literal
+ ;; TODO: move this to ids.rkt
+ the-case-dispatch
+ ;; Defines a static overload for a polysemic method
+ define-poly-case)
 
-(require racket/match
+(require "private/ids.rkt"
+         racket/contract ;; TODO: remove if not needed.
          (for-syntax racket/base
-                     racket/contract
-                     racket/string
+                     racket/list
+                     racket/set
                      racket/require-transform
-                     syntax/parse))
+                     racket/provide-transform
+                     syntax/parse
+                     syntax/id-table
+                     syntax/id-set
+                     "private/utils.rkt"
+                     racket/contract
+                     racket/syntax)
+         (for-meta 2 racket/base))
 
-;; This scope is used to hide and later identify parts of polysemic identifiers.
-;; Each part is stored in a separate identifier.
-(define-for-syntax poly-scope (make-syntax-introducer))
+(begin-for-syntax
+  (define/contract all-meanings (set/c symbol? #:kind 'mutable) (mutable-set))
+  (define/contract (register-meanings-end syms)
+    (-> (listof symbol?) void?)
+    (for ([meaning (in-list syms)])
+      (set-add! all-meanings meaning)))
+  
+  (define/contract (register-meanings syms)
+    (-> (listof symbol?) void?)
+    (for ([meaning (in-list syms)])
+      (set-add! all-meanings meaning))
+    (syntax-local-lift-module-end-declaration
+     #`(begin-for-syntax
+         (register-meanings-end '#,syms)))))
 
-;; Utilities
+;; Require transformers
 ;; _____________________________________________________________________________
 
-;; Escapes the identifier, so that it does not contain the separator character
-(begin-for-syntax
-  (define/contract (escape-symbol sym separator escape)
-    (-> symbol? char? char? string?)
-    (let ()
-      (define s1 (symbol->string sym))
-      (define s2 (string-replace s1
-                                 (format "~a" escape)
-                                 (format "~a~a" escape escape)))
-      (define s3 (string-replace s1
-                                 (format "~a" separator)
-                                 (format "~a~a" separator escape)))
-      s3)))
+;; Common implementation for the poly-rename-in and poly-only-in rename
+;; transformers.
+(define-for-syntax (poly-require-transformer req stx)
+  (syntax-parse stx
+    [(_ mod
+        [old-id:id
+         meaning:id
+         {~optional new-id:id #:defaults ([new-id #'old-id])}]
+        ...)
+     #:with (old-generated-id ...)
+     (map gen-id
+          (syntax->list #'(old-id ...))
+          (map syntax-e (syntax->list #'(meaning ...))))
+     #:with (new-generated-id ...)
+     (map gen-id
+          (syntax->list #'(new-id ...))
+          (map syntax-e (syntax->list #'(meaning ...))))
+     #:with (new-id-no-duplicates ...)
+     (remove-duplicates (syntax->list #'(new-id ...))
+                        free-identifier=?)
+     #:with (new-safeguard-no-duplicates ...)
+     (map (λ (one-id) (gen-id one-id '| safeguard |))
+          (syntax->list #'(new-id-no-duplicates ...)))
+     (register-meanings (syntax->datum #'(meaning ...)))
+     (expand-import
+      #`(combine-in
+         ;; We always require the same ids, so that multiple requires
+         ;; are a no-op, instead of causing conflicts.
+         (only-in polysemy/private/ids
+                  [the-polysemic-id new-id-no-duplicates] ...
+                  [the-safeguard-id new-safeguard-no-duplicates] ...)
+         (#,req mod [old-generated-id new-generated-id] ...)))]))
 
-;; Generates a single-meaning identifier from `id` and `meaning`, possibly
-;; escaping some characters in `meaning` to remove ambiguities.
-(begin-for-syntax
-  (define/contract (gen-id ctx meaning id)
-    (-> syntax? symbol? identifier? identifier?)
-    (let ()
-      (define s (format " polysemy_~a_~a"
-                        (escape-symbol meaning #\_ #\\)
-                        (symbol->string (syntax-e id))))
-      (datum->syntax ctx (string->symbol s) id id))))
-
-;; Require transformer
-;; _____________________________________________________________________________
-
-;; Require transformer which allows selecting and renaming parts of polysemic
-;; parts of identifiers.
-#;(define-syntax poly-in
-    (make-require-transformer
-     (λ (stx)
-       (syntax-case stx ()
-         [(_ mod id ...)
-          (let ()
-            ;; Works, but we cannot bind a syntax transformer that way.
-            (define idd (syntax-local-lift-expression #'42))
-            ;; Too late, top-level uses of macros have already been prefixed
-            ;; with #%app:
-            (syntax-local-lift-module-end-declaration
-             #'(begin (define-syntax id (λ (stx) #`'(#,stx 42))) ...))
-            ;; Won't work because we have to run expand-import before the
-            ;; module has a chance to be injected:
-            (syntax-local-lift-module
-             #'(module m racket/base
-                 (provide id ...)
-                 (define-syntax id (λ (stx) #`'(#,stx 42))) ...))
-            (define-values (a b) (expand-import #'(only-in mod id ...)))
-            (define a*
-              (let ([local-id (import-local-id (car a))]
-                    [src-sym (import-src-sym (car a))]
-                    [src-mod-path (import-src-mod-path (car a))]
-                    [mode (import-mode (car a))]
-                    [req-mode (import-req-mode (car a))]
-                    [orig-mode (import-orig-mode (car a))]
-                    [orig-stx (import-orig-stx (car a))])
-                (list (import idd
-                              src-sym
-                              src-mod-path
-                              mode
-                              req-mode
-                              orig-mode
-                              orig-stx))))
-            (values a* b))]))))
-
+;; Require transformer which allows renaming parts of polysemic identifiers.
 (define-syntax poly-rename-in
   (make-require-transformer
-   (syntax-parser
-     [(_ mod [old-id:id meaning:id new-id:id] ...)
-      (with-syntax ([(old-generated-id ...)
-                     (map gen-id
-                          (syntax->list #'(old-id ...))
-                          (map syntax-e (syntax->list #'(meaning ...)))
-                          (syntax->list #'(old-id ...)))]
-                    [(new-generated-id ...)
-                     (map gen-id
-                          (syntax->list #'(new-id ...))
-                          (map syntax-e (syntax->list #'(meaning ...)))
-                          (syntax->list #'(new-id ...)))])
-        (expand-import
-         #'(rename-in mod [old-generated-id new-generated-id] ...)))])))
+   (λ (stx) (poly-require-transformer #'rename-in stx))))
 
-;; polysemic require (experiment, nothing interesting for now)
-(define-syntax poly-require
-  (λ (stx)
-    (syntax-case stx ()
-      [(_ mod id ...)
-       (with-syntax ([(tmp ...) (generate-temporaries #'(id ...))])
-         #'(begin
-             (require (only-in mod [id tmp] ...))
-             (define-syntax id (λ (stx) #'42))
-             ...))])))
+;; Require transformer which allows selecting and renaming parts of polysemic
+;; identifiers.
+(define-syntax poly-only-in
+  (make-require-transformer
+   (λ (stx) (poly-require-transformer #'only-in stx))))
+
+;; Provide transformers
+;; _____________________________________________________________________________
+
+(define-syntax poly-out
+  (make-provide-pre-transformer
+   (λ (provide-spec modes)
+     (syntax-parse provide-spec
+       [(_ [{~or {~and :id old-id new-id} (old-id:id new-id:id)} meaning ...]
+           ...)
+        (with-syntax ([((old-generated-id ...) ...)
+                       (map (λ (one-id meanings)
+                              (map (λ (one-meaning)
+                                     (gen-id one-id (syntax-e one-meaning)))
+                                   (syntax->list meanings)))
+                            (syntax->list #'(old-id ...))
+                            (syntax->list #'((meaning ...) ...)))]
+                      [((new-generated-id ...) ...)
+                       (map (λ (one-id meanings)
+                              (map (λ (one-meaning)
+                                     (gen-id one-id (syntax-e one-meaning)))
+                                   (syntax->list meanings)))
+                            (syntax->list #'(new-id ...))
+                            (syntax->list #'((meaning ...) ...)))]
+                      [(safeguard ...)
+                       (map (λ (one-id) (gen-id one-id '| safeguard |))
+                            (syntax->list #'(new-id ...)))])
+          (register-meanings (syntax->datum #'(meaning ... ...)))
+          (expand-export #'(combine-out new-id ...
+                                        safeguard ...
+                                        (rename-out [old-generated-id
+                                                     new-generated-id]
+                                                    ... ...))
+                         modes))]))))
 
 ;; Definition of polysemic identifiers and parts of these
 ;; _____________________________________________________________________________
 
-;; Definition of a new polysemic identifier
 (define-syntax (define-poly stx)
   (syntax-case stx ()
+    ;; Definition of a new polysemic identifier
     [(_ id)
-     #'(define-syntax id (polysemic #'id))]
+     (with-syntax ([safeguard (gen-id #'id '| safeguard |)])
+       ;; TODO: this won't handle local shadowings very well.
+       (if (and (identifier-binding #'id) (identifier-binding #'safeguard))
+           #'(begin)
+           #`(local-require
+              (only-in polysemy/private/ids
+                       #,@(if (identifier-binding #'id)
+                              #'{}
+                              #'{[the-polysemic-id id]})
+                       #,@(if (identifier-binding #'safeguard)
+                              #'{}
+                              #'{[the-safeguard-id safeguard]})))))]
+    ;; Definition of a part of a (possibly new) polysemic identifier
     [(_ id meaning value)
-     (with-syntax ([generated-id (gen-id #'id (syntax-e #'meaning) #'id)])
-       #'(define-syntax generated-id value))]))
+     (with-syntax ([safeguard (gen-id #'id '| safeguard |)]
+                   [generated-id (gen-id #'id (syntax-e #'meaning))])
+       (with-syntax ([define-meaning #'(define-syntax generated-id value)])
+         (register-meanings (syntax->datum #'(meaning)))
+         ;; TODO: this won't handle local shadowings very well.
+         (if (and (identifier-binding #'id) (identifier-binding #'safeguard))
+             #'define-meaning
+             #'(begin
+                 (define-poly id)
+                 define-meaning))))]))
 
-;; Creates a wrapper for a prop:…, by extracting the the given `meaning`
-;; for the identifier.
-(define-for-syntax ((make-wrapper meaning) self stx)
-  ((syntax-local-value (gen-id (car (syntax-e stx)) meaning (polysemic-id self))) stx))
-
-;; Wrapper for prop:procedure on a transformer id.
-;; Dispatches to 
-(define-for-syntax (macro-wrapper self stx)
-  (define id (polysemic-id self))
-  (if (syntax? stx)
-      (syntax-case stx (set!)
-        [x
-         (identifier? #'x)
-         ((syntax-local-value (gen-id #'x 'identifier-macro id)) stx)]
-        [(set! v . _)
-         ((syntax-local-value (gen-id #'v 'set!-macro id)) stx)]
-        [(self . _)
-         ((syntax-local-value (gen-id #'self 'normal-macro id)) stx)])
-      (error "oops")#;((syntax-local-value (gen-id 'normal-macro id)) stx)))
-
-;; Instances of this struct are bound (as transformer values) to polysemic ids.
+;; Syntax-parse pattern expander which extracts the given meaning from the
+;; matched id
 (begin-for-syntax
-  (struct polysemic (id)
-    #:property prop:match-expander (make-wrapper 'match-expander)
-    #:property prop:procedure macro-wrapper))
+  (define-syntax-class (poly-stxclass meaning)
+    #:attributes (value)
+    (pattern pvar:id
+             #:attr value (syntax-local-value (gen-id #'pvar meaning)
+                                              (λ () #f))
+             #:when (attribute value)))
+  (define-syntax ~poly 
+    (pattern-expander
+     (λ (stx)
+       (syntax-case stx ()
+         [(_ pvar meaning)
+          ;; Do we need to (register-meanings #'(meaning)) here? I think not.
+          #'{~and {~var pvar (poly-stxclass 'meaning)}}
+          #;#'{~and {~var pvar id}
+                    {~do (displayln #'pvar)}
+                    {~bind [meaning-pvar
+                            ]}
+                    {~parse #t (not (not (attribute meaning-pvar)))}}])))))
+
+(define-syntax-rule (define-poly-literal initial-id meaning syntax-class)
+  (begin
+    (define-poly initial-id meaning
+      (λ (stx) (raise-syntax-error 'initial-id "reserved identifier" stx)))
+    (begin-for-syntax
+      (define-syntax-class syntax-class
+        #:attributes ()
+        ;; TODO: the description is not present in error messages. Why ?
+        ;#:description
+        ;(format "the ~a meaning (originally bound to the ~a identifier)"
+        ;        'meaning
+        ;        'initial-id)
+        (pattern {~poly _ meaning})))))
+
+(begin-for-syntax
+  (struct a-case (f-id pred-id) #:transparent))
+
+;; TODO: multimethods
+(define-syntax (define-poly-case stx)
+  (syntax-case stx ()
+    [(_ (name [arg₀ pred?] argᵢ ...) . body)
+     (let ([meaning (string->symbol
+                     (format "~a" `(poly-case ,(syntax-e #'pred?))))])
+       (with-syntax ([generated-name (gen-id #'name meaning)]
+                     [generated-normal-macro (gen-id #'name 'normal-macro)])
+         (register-meanings `(,meaning))
+         #`(begin
+             (define-poly name)
+             #,@(if (identifier-binding #'generated-normal-macro)
+                    #'{}
+                    #'{(local-require
+                        (only-in polysemy
+                                 [the-case-dispatch generated-normal-macro]))})
+             (define/contract (tmp-f arg₀ argᵢ ...)
+               (-> pred? (or/c 'argᵢ any/c) ... any)
+               . body)
+             (define-syntax generated-name (a-case #'tmp-f #'pred?)))))]))
+
+(define-for-syntax contracts-supertypes #f)
+(define-for-syntax contracts-expand #f)
+(define-for-syntax (detect-overlap stx pred-ids)
+  ;; Lazily fill in the supertypes hash table, to avoid compile-time costs
+  ;; when the module is later required.
+  (unless contracts-supertypes
+    (set! contracts-supertypes
+          (make-free-id-table
+           `((,#'string? . (,#'any/c))
+             (,#'exact-positive-integer? . (,#'exact-integer? ,#'positive?))
+             (,#'exact-integer . (,#'integer? ,#'exact?))
+             (,#'integer? . (,#'number?))
+             (,#'exact . (,#'number?)) ;; not quite right
+             (,#'number? . (,#'any/c))
+             (,#'zero? . ,#'integer?)
+             #;…))))
+  ;; Lazily fill in the "expansion" hash table, to avoid compile-time costs
+  ;; when the module is later required.
+  (unless contracts-expand
+    (set! contracts-expand
+          (make-free-id-table
+           `((,#'exact-nonnegative-integer? . (,#'zero?
+                                               ,#'exact-positive-integer?))
+             #;…))))
+  ;; Build the set of covered contracts. When a contract is a union of two
+  ;; disjoint contracts, it is replaced by these
+  ;; (e.g. exact-nonnegative-integer? is replaced by zero? and
+  ;; exact-positive-integer?)
+  (define covered-ids (mutable-free-id-set))
+  (for/list ([pred-id (in-list pred-ids)])
+    (define expanded*
+      (free-id-table-ref contracts-expand
+                         pred-id
+                         (λ () (list pred-id))))
+    (for ([expanded (in-list expanded*)])
+      (when (free-id-set-member? covered-ids expanded)
+        (raise-syntax-error 'polysemy
+                            "Overlap between function cases"
+                            stx
+                            #f
+                            pred-ids))
+      (free-id-set-add! covered-ids expanded)))
+  ;; Move up the inheritance DAG, and see if any of the ancestors
+  ;; is covered. Since we start with the parents of the user-supplied contract,
+  ;; there will be no self-detection.
+  (define (recur pred-id)
+    (when (free-id-set-member? covered-ids pred-id)
+        (raise-syntax-error 'polysemy
+                            "some available function cases overlap"
+                            stx
+                            #f
+                            pred-ids))
+    (unless (free-identifier=? pred-id #'any/c)
+      (for-each recur (free-id-table-ref contracts-supertypes pred-id '()))))
+  (for ([pred-id (in-list pred-ids)])
+    (apply recur (free-id-table-ref contracts-supertypes pred-id))))
+
+(define-for-syntax (the-case-dispatch-impl stx)
+  (syntax-case stx ()
+    [(id . args)
+     (identifier? #'id)
+     #`(#%app #,(the-case-dispatch-impl #'id) . args)]
+    [id
+     (identifier? #'id)
+     (let ()
+       (define/with-syntax ((f-id pred-id) ...)
+         (for*/list ([meaning (in-set all-meanings)]
+                     [generated-name (in-value (gen-id #'id meaning))]
+                     [slv (in-value
+                           (syntax-local-value generated-name (λ () #f)))]
+                     #:when (and slv (a-case? slv)))
+           (list (a-case-f-id slv)
+                 (a-case-pred-id slv))))
+       ;; Detect if there is overlap among the predicates, and raise an error
+       ;; in that case.
+       (detect-overlap #'id (syntax->list #'(pred-id ...)))
+       ;; TODO: for now, this only supports a single argument.
+       ;;       we should generalize it to support case-λ, and dispatch on
+       ;;       multiple arguments
+       ;; TODO: use syntax-local-lift-module-end-declaration to cache
+       ;;       the generated dispatch functions.
+       #`(λ (arg)
+           (cond
+             [(pred-id arg) (f-id arg)]
+             ...)))]))
+
+(define-syntax the-case-dispatch the-case-dispatch-impl)
