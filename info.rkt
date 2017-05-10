@@ -1,8 +1,8 @@
 #lang info
 (define collection "polysemy")
-(define deps '("base"
+(define deps '(("base" "6.3")
                "rackunit-lib"))
-(define build-deps '("scribble-lib"
+(define build-deps '(("scribble-lib" "1.16")
                      "racket-doc"))
 (define scribblings '(("scribblings/polysemy.scrbl" ())))
 (define pkg-desc

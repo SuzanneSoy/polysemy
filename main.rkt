@@ -1,120 +1,18 @@
 #lang racket/base
 
-(provide
- ;; A require transformer
- poly-rename-in
- ;; Another require transformer
- poly-only-in
- ;; Provide transformer
- poly-out
- ;; Definition of a polysemic id, and of a part of a polysemic id
- define-poly
- ;; Syntax-parse pattern expander which extracts the given meaning from the id
- (for-syntax ~poly)
- ;; Defines a literal which can be renamed, without conflicting with other
- ;; poly literals, or identifiers with other meanings.
- define-poly-literal
- ;; Defines a static overload for a polysemic method
- define-poly-case)
+;; The provide form is at the bottom of the file, as it needs to use some
+;; provide transformers defined within this file.
 
 (require "private/ids.rkt"
          racket/contract ;; TODO: remove if not needed.
          (for-syntax racket/base
                      racket/list
-                     racket/set
                      racket/require-transform
                      racket/provide-transform
                      syntax/parse
-                     syntax/id-table
-                     syntax/id-set
                      "private/utils.rkt"
-                     racket/contract
-                     racket/syntax)
+                     racket/contract)
          (for-meta 2 racket/base))
-
-;; Require transformers
-;; _____________________________________________________________________________
-
-;; Common implementation for the poly-rename-in and poly-only-in rename
-;; transformers.
-(define-for-syntax (poly-require-transformer req stx)
-  (syntax-parse stx
-    [(_ mod
-        [{~or {~and :id old-id new-id}
-              (old-id:id new-id:id)}
-         meaning:id
-         ...]
-        ...)
-     #:with ((old-generated-id ...) ...)
-     (map (λ (id meanings) (map (λ (meaning) (gen-id id (syntax-e meaning)))
-                                (syntax->list meanings)))
-          (syntax->list #'(old-id ...))
-          (syntax->list #'((meaning ...) ...)))
-     #:with ((new-generated-id ...) ...)
-     (map (λ (id meanings) (map (λ (meaning) (gen-id id (syntax-e meaning)))
-                                (syntax->list meanings)))
-          (syntax->list #'(new-id ...))
-          (syntax->list #'((meaning ...) ...)))
-     #:with (new-id-no-duplicates ...)
-     (remove-duplicates (syntax->list #'(new-id ...))
-                        free-identifier=?)
-     #:with (new-safeguard-no-duplicates ...)
-     (map (λ (one-id) (gen-id one-id '| safeguard |))
-          (syntax->list #'(new-id-no-duplicates ...)))
-     (register-meanings (syntax->datum #'(meaning ... ...)))
-     (expand-import
-      #`(combine-in
-         ;; We always require the same ids, so that multiple requires
-         ;; are a no-op, instead of causing conflicts.
-         (only-in polysemy/private/ids
-                  [the-polysemic-id new-id-no-duplicates] ...
-                  [the-safeguard-id new-safeguard-no-duplicates] ...)
-         (#,req mod [old-generated-id new-generated-id] ... ...)))]))
-
-;; Require transformer which allows renaming parts of polysemic identifiers.
-(define-syntax poly-rename-in
-  (make-require-transformer
-   (λ (stx) (poly-require-transformer #'rename-in stx))))
-
-;; Require transformer which allows selecting and renaming parts of polysemic
-;; identifiers.
-(define-syntax poly-only-in
-  (make-require-transformer
-   (λ (stx) (poly-require-transformer #'only-in stx))))
-
-;; Provide transformers
-;; _____________________________________________________________________________
-
-(define-syntax poly-out
-  (make-provide-pre-transformer
-   (λ (provide-spec modes)
-     (syntax-parse provide-spec
-       [(_ [{~or {~and :id old-id new-id} (old-id:id new-id:id)} meaning ...]
-           ...)
-        (with-syntax ([((old-generated-id ...) ...)
-                       (map (λ (one-id meanings)
-                              (map (λ (one-meaning)
-                                     (gen-id one-id (syntax-e one-meaning)))
-                                   (syntax->list meanings)))
-                            (syntax->list #'(old-id ...))
-                            (syntax->list #'((meaning ...) ...)))]
-                      [((new-generated-id ...) ...)
-                       (map (λ (one-id meanings)
-                              (map (λ (one-meaning)
-                                     (gen-id one-id (syntax-e one-meaning)))
-                                   (syntax->list meanings)))
-                            (syntax->list #'(new-id ...))
-                            (syntax->list #'((meaning ...) ...)))]
-                      [(safeguard ...)
-                       (map (λ (one-id) (gen-id one-id '| safeguard |))
-                            (syntax->list #'(new-id ...)))])
-          (register-meanings (syntax->datum #'(meaning ... ...)))
-          (pre-expand-export #'(combine-out new-id ...
-                                            safeguard ...
-                                            (rename-out [old-generated-id
-                                                         new-generated-id]
-                                                        ... ...))
-                             modes))]))))
 
 ;; Definition of polysemic identifiers and parts of these
 ;; _____________________________________________________________________________
@@ -208,6 +106,141 @@
                                  [the-case-dispatch
                                   generated-identifier-macro]))})
              (define/contract (tmp-f arg₀ argᵢ ...)
-               (-> pred? (or/c 'argᵢ any/c) ... any)
+               (-> pred? (or/c 'argᵢ 'TODO any/c) ... any)
                . body)
              (define-syntax generated-name (a-case #'tmp-f #'pred?)))))]))
+
+;; Require/provide transformers
+;; _____________________________________________________________________________
+
+
+(begin-for-syntax
+  (define-syntax-class poly-meaning-expander-sc
+    #:attributes ([expanded 1])
+    (pattern {~poly x poly-reqprov-id-expander}
+             #:with (tmp:poly-meaning-expander-sc ...)
+             ((attribute x.value) #'x)
+             #:with (expanded ...) #'(tmp.expanded ... ...))
+    (pattern x:id #:with (expanded ...) #'(x))
+    (pattern {~and whole ({~poly x poly-meaning-expander} . _)}
+             #:with (tmp:poly-meaning-expander-sc ...)
+             ((attribute x.value) #'whole)
+             #:with (expanded ...) #'(tmp.expanded ... ...))))
+(define-poly case-function poly-meaning-expander
+  (λ (stx)
+    (syntax-case stx ()
+      ;; TODO: make the normal-macro and identifier-macro switchable.
+      [(_ pred?) #`(normal-macro
+                    identifier-macro
+                    #,(string->symbol
+                       (format "~a" `(poly-case ,(syntax-e #'pred?)))))])))
+
+;; Require transformers
+;; _____________________________________________________________________________
+
+;; Common implementation for the poly-rename-in and poly-only-in rename
+;; transformers.
+(define-for-syntax (poly-require-transformer req stx)
+  (syntax-parse stx
+    [(_ mod
+        [{~or {~and :id old-id new-id} (old-id:id new-id:id)}
+         meaning:poly-meaning-expander-sc
+         ...]
+        ...)
+     #:with ((old-generated-id ...) ...)
+     (map (λ (id meanings)
+            (map (λ (meaning) (gen-id id (syntax-e meaning)))
+                 (remove-duplicates (syntax->list meanings) free-identifier=?)))
+          (syntax->list #'(old-id ...))
+          (syntax->list #'((meaning.expanded ... ...) ...)))
+     #:with ((new-generated-id ...) ...)
+     (map (λ (id meanings)
+            (map (λ (meaning) (gen-id id (syntax-e meaning)))
+                 (remove-duplicates (syntax->list meanings) free-identifier=?)))
+          (syntax->list #'(new-id ...))
+          (syntax->list #'((meaning.expanded ... ...) ...)))
+     #:with (new-id-no-duplicates ...)
+     (remove-duplicates (syntax->list #'(new-id ...))
+                        free-identifier=?)
+     #:with (new-safeguard-no-duplicates ...)
+     (map (λ (one-id) (gen-id one-id '| safeguard |))
+          (syntax->list #'(new-id-no-duplicates ...)))
+     (register-meanings (syntax->datum #'(meaning.expanded ... ... ...)))
+     (expand-import
+      #`(combine-in
+         ;; We always require the same ids, so that multiple requires
+         ;; are a no-op, instead of causing conflicts.
+         (only-in polysemy/private/ids
+                  [the-polysemic-id new-id-no-duplicates] ...
+                  [the-safeguard-id new-safeguard-no-duplicates] ...)
+         (#,req mod [old-generated-id new-generated-id] ... ...)))]))
+
+;; Require transformer which allows renaming parts of polysemic identifiers.
+(define-syntax poly-rename-in
+  (make-require-transformer
+   (λ (stx) (poly-require-transformer #'rename-in stx))))
+
+;; Require transformer which allows selecting and renaming parts of polysemic
+;; identifiers.
+(define-syntax poly-only-in
+  (make-require-transformer
+   (λ (stx) (poly-require-transformer #'only-in stx))))
+
+;; Provide transformer
+;; _____________________________________________________________________________
+
+(define-syntax poly-out
+  (make-provide-pre-transformer
+   (λ (provide-spec modes)
+     (syntax-parse provide-spec
+       [(_ [{~or {~and :id old-id new-id} (old-id:id new-id:id)}
+            meaning:poly-meaning-expander-sc ...]
+           ...)
+        (with-syntax ([((old-generated-id ...) ...)
+                       (map (λ (one-id meanings)
+                              (map (λ (one-meaning)
+                                     (gen-id one-id (syntax-e one-meaning)))
+                                   (remove-duplicates (syntax->list meanings)
+                                                      free-identifier=?)))
+                            (syntax->list #'(old-id ...))
+                            (syntax->list #'((meaning.expanded ... ...) ...)))]
+                      [((new-generated-id ...) ...)
+                       (map (λ (one-id meanings)
+                              (map (λ (one-meaning)
+                                     (gen-id one-id (syntax-e one-meaning)))
+                                   (remove-duplicates (syntax->list meanings)
+                                                      free-identifier=?)))
+                            (syntax->list #'(new-id ...))
+                            (syntax->list #'((meaning.expanded ... ...) ...)))]
+                      [(old-safeguard ...)
+                       (map (λ (one-id) (gen-id one-id '| safeguard |))
+                            (syntax->list #'(old-id ...)))]
+                      [(new-safeguard ...)
+                       (map (λ (one-id) (gen-id one-id '| safeguard |))
+                            (syntax->list #'(new-id ...)))])
+          (register-meanings (syntax->datum #'(meaning.expanded ... ... ...)))
+          (pre-expand-export #'(rename-out [old-safeguard new-safeguard] ...
+                                           [old-id new-id] ...
+                                           [old-generated-id new-generated-id]
+                                           ... ...)
+                             modes))]))))
+
+(provide
+ ;; A require transformer
+ poly-rename-in
+ ;; Another require transformer
+ poly-only-in
+ ;; Provide transformer
+ poly-out
+ ;; Definition of a polysemic id, and of a part of a polysemic id
+ define-poly
+ ;; Syntax-parse pattern expander which extracts the given meaning from the id
+ (for-syntax ~poly)
+ ;; Defines a literal which can be renamed, without conflicting with other
+ ;; poly literals, or identifiers with other meanings.
+ define-poly-literal
+ ;; Defines a static overload for a polysemic method
+ define-poly-case
+ ;; Syntactic token used to build case-function meanings
+ ;; TODO: We probably should make it a case-function-expander instead of a token
+ (poly-out [case-function poly-meaning-expander]))

@@ -1,6 +1,7 @@
 #lang racket/base
 
 (require racket/match
+         racket/contract
          (for-syntax racket/base
                      racket/contract
                      racket/set
@@ -97,7 +98,10 @@
     #:property prop:match-expander
     (make-wrapper 'match-expander
                   (λ (id) #`(var #,id))
-                  (λ (stx id args) (datum->syntax stx `(,id . ,args) stx stx)))
+                  (λ (stx id args) (raise-syntax-error
+                                    'match
+                                    "syntax error in pattern"
+                                    stx)))
     #:property prop:procedure macro-wrapper))
 
 ;; The only polysemic id (all others are renamings of this one)
@@ -105,6 +109,8 @@
 
 ;; Record all known meanigns, so that the-case-dispatch-impl can perform some
 ;; sanity checks.
+(define-for-syntax ignore-err-rx
+  #px"not currently transforming an expression within a module declaration")
 (begin-for-syntax
   (define/contract all-meanings (set/c symbol? #:kind 'mutable) (mutable-set))
   (define/contract (register-meanings-end syms)
@@ -116,9 +122,15 @@
     (-> (listof symbol?) void?)
     (for ([meaning (in-list syms)])
       (set-add! all-meanings meaning))
-    (syntax-local-lift-module-end-declaration
-     #`(begin-for-syntax
-         (register-meanings-end '#,syms)))))
+    (with-handlers ([(λ (e)
+                       (and exn:fail:contract?
+                            (not (eq? (syntax-local-context) 'module))
+                            (regexp-match ignore-err-rx (exn-message e))))
+                     (λ (e) (void))])
+      ;; I'm not sure if this is really needed.
+      (syntax-local-lift-module-end-declaration
+       #`(begin-for-syntax
+           (register-meanings-end '#,syms))))))
 
 (begin-for-syntax
   ;; Represents a single overload of a function (function-id + predicate-id)
@@ -142,6 +154,8 @@
              (,#'exact? . (,#'number?)) ;; not quite right
              (,#'number? . (,#'any/c))
              (,#'zero? . (,#'integer?))
+             (,#'boolean? . (,#'any/c))
+             (,#'list? . (,#'any/c))
              #;…))))
   ;; Lazily fill in the "expansion" hash table, to avoid compile-time costs
   ;; when the module is later required.
@@ -209,12 +223,18 @@
        ;; TODO: for now, this only supports a single argument.
        ;;       we should generalize it to support case-λ, and dispatch on
        ;;       multiple arguments
-       ;; TODO: use syntax-local-lift-module-end-declaration to cache
-       ;;       the generated dispatch functions.
-       #`(λ (arg)
-           (cond
-             [(pred-id arg) (f-id arg)]
-             ...)))]))
+       ;; TODO: use syntax-local-lift-expression to cache
+       ;;       the generated dispatch functions. Beware of all the failure
+       ;;       modes: it is very easy to lift a variable in an expression
+       ;;       context, and try to use it in another nested context outside of
+       ;;       the lifted expression's scope.
+       #`(let ()
+           (define/contract (id arg)
+             (-> (or/c pred-id ...) any)
+             (cond
+               [(pred-id arg) (f-id arg)]
+               ...))
+           id))]))
 
 ;; The only case-dispatch macro (all others are renamings of this one)
 (define-syntax the-case-dispatch the-case-dispatch-impl)
