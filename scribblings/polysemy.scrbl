@@ -285,4 +285,8 @@ There are currently many limitations. Here are a few:
   have a notion of scopes (which could be used to hide some of these names), I
   do not see any way to avoid this problem, while still making simple imports
   (i.e. without renaming) work seamlessly with the stock implementation of
-  @racket[require].}]
+  @racket[require].}
+ @item{There is no support for polysemic identifiers in Scribble: identifiers
+  will not get highlighted, and @tt{raco doc-coverage} will complain that some
+  internal identifiers are not documented (using @tt{raco doc-coverage -s '^ '
+   module-path} is a quick workaround for this second issue).}]
