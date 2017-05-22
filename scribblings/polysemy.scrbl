@@ -245,7 +245,7 @@ themselves to be renamed, to circumvent conflicts).
  @racket[poly-only-in] or @racket[poly-out] form, expands to the meaning symbol
  for a function overload accepting the given argument type. The
  @racket[normal-macro] and @racket[identifier-macro] meanings (which would
- normally be associated with @racketmodname[polysemic]'s dynamic dispatch
+ normally be associated with @racketmodname[polysemy]'s dynamic dispatch
  macro) are also included in the expansion.}
 
 @defidform[#:kind "meaning"
