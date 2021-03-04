@@ -8,4 +8,4 @@
 (define pkg-desc
   "Polysemic identifiers, each meaning can be required and renamed separately")
 (define version "0.1")
-(define pkg-authors '("Georges Dupéron"))
+(define pkg-authors '("Suzanne Soy"))
